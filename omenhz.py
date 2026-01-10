@@ -9,6 +9,9 @@ import os
 import sys
 import subprocess
 import re
+import webbrowser
+import requests
+from tkinter import messagebox
 from dataclasses import dataclass, asdict, field
 from typing import List, Optional, Tuple, Dict
 
@@ -26,6 +29,9 @@ from pystray import MenuItem as item
 
 APP_NAME = "Omen Hz Controller Pro"
 MONITOR_INTERVAL_SEC = 3
+APP_VERSION = "1.0"
+PROGRAMS_URL = "https://www.saydut.com/static/programs.json"
+PROGRAM_ID = "pc-performans-ayarlayici"
 
 CONFIG_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "OmenHzController")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
@@ -33,6 +39,26 @@ CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 
 def ensure_config_dir() -> None:
     os.makedirs(CONFIG_DIR, exist_ok=True)
+
+
+def _semver_tuple(v: str) -> tuple[int, int, int]:
+    v = (v or "").strip()
+    if v.startswith("v"):
+        v = v[1:]
+    parts = v.split(".")
+    out = []
+    for i in range(3):
+        try:
+            out.append(int(parts[i]))
+        except Exception:
+            out.append(0)
+    return tuple(out)  # type: ignore
+
+
+def _http_get_json(url: str, timeout: int = 15) -> dict:
+    response = requests.get(url, timeout=timeout)
+    response.raise_for_status()
+    return response.json()
 
 
 # ============================================================
@@ -482,6 +508,7 @@ class HzApp(ctk.CTk):
         self.icon = None
         self._last_plug_state: Optional[bool] = None
         self._apply_lock = threading.Lock()
+        self._update_prompted = False
 
         
 
@@ -516,6 +543,8 @@ class HzApp(ctk.CTk):
         # Live info panel
         self.live_label = ctk.CTkLabel(self.container, text="CPU: (pencere açıkken güncellenir)", font=("Roboto", 12))
         self.live_label.pack(pady=(0, 12))
+
+        self.after(1500, self.check_launcher_update_background)
 
         # Toggles
         self.tog_frame = ctk.CTkFrame(self.container, corner_radius=14)
@@ -1029,6 +1058,70 @@ class HzApp(ctk.CTk):
         )
         self.icon = pystray.Icon("HzControlPro", image, APP_NAME, menu)
         threading.Thread(target=self.icon.run, daemon=True).start()
+
+    def open_launcher_update(self):
+        launcher_hint_path = r"C:\Saydut\launcher_path.txt"
+        launcher_candidates = [
+            r"C:\Saydut\SaydutLauncher\SaydutLauncher.exe",
+            r"C:\Saydut\Saydut Launcher\SaydutLauncher.exe",
+            r"C:\Saydut\SaydutLauncher\Saydut Launcher.exe",
+        ]
+
+        launcher_path = None
+        if os.path.exists(launcher_hint_path):
+            try:
+                with open(launcher_hint_path, "r", encoding="utf-8") as handle:
+                    candidate = handle.read().strip()
+                if candidate and os.path.exists(candidate):
+                    launcher_path = candidate
+            except OSError:
+                launcher_path = None
+
+        if not launcher_path:
+            launcher_path = next((p for p in launcher_candidates if os.path.exists(p)), None)
+
+        if launcher_path:
+            try:
+                if launcher_path.lower().endswith(".py"):
+                    subprocess.Popen([sys.executable, launcher_path])
+                else:
+                    subprocess.Popen([launcher_path])
+                return
+            except Exception as exc:
+                messagebox.showerror("Hata", f"Launcher acilamadi:\n{exc}")
+                return
+
+        messagebox.showinfo(
+            "Launcher Gerekli",
+            "Guncelleme icin Saydut Launcher gerekli.\nIndirip kurduktan sonra tekrar deneyin.",
+        )
+        webbrowser.open("https://www.saydut.com")
+
+    def show_update_prompt(self, latest_version: str) -> None:
+        if self._update_prompted:
+            return
+        self._update_prompted = True
+        if messagebox.askyesno(
+            "Guncelleme mevcut",
+            f"Mevcut surum: {APP_VERSION}\nYeni surum: {latest_version}\n\nLauncher acilsin mi?",
+        ):
+            self.open_launcher_update()
+
+    def check_launcher_update_background(self) -> None:
+        def worker():
+            try:
+                payload = _http_get_json(PROGRAMS_URL)
+                latest = None
+                for item in payload.get("programs", []):
+                    if item.get("id") == PROGRAM_ID:
+                        latest = item.get("version", "")
+                        break
+                if latest and _semver_tuple(latest) > _semver_tuple(APP_VERSION):
+                    self.after(0, lambda: self.show_update_prompt(latest))
+            except Exception:
+                return
+
+        threading.Thread(target=worker, daemon=True).start()
 
 
 if __name__ == "__main__":
